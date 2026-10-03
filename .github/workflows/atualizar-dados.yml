@@ -1,0 +1,22 @@
+name: Testar conexão AWS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  testar-aws:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configurar acesso AWS
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::885423902246:role/GitHubActions-Cockpit
+          aws-region: sa-east-1
+
+      - name: Testar conexão
+        run: aws sts get-caller-identity
