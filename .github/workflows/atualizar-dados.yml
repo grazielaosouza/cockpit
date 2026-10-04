@@ -1,22 +1,252 @@
-name: Testar conexão AWS
+name: Atualizar dados do cockpit
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"
 
 permissions:
   id-token: write
-  contents: read
+  contents: write
 
 jobs:
-  testar-aws:
+  atualizar-dados:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
       - name: Configurar acesso AWS
         uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: arn:aws:iam::885423902246:role/GitHubActions-Cockpit
           aws-region: sa-east-1
 
-      - name: Testar conexão
-        run: aws sts get-caller-identity
+      - name: Instalar dependência Python
+        run: python -m pip install boto3
+
+      - name: Consultar Athena e gerar data.json
+        env:
+          AWS_REGION: sa-east-1
+          ATHENA_DATABASE: cockpit_lab
+          ATHENA_OUTPUT: s3://cockpit-operacoes-financas-dev-gra-885423902246-sa-east-1-an/athena-results/cockpit/
+        run: |
+          python <<'PY'
+          import boto3
+          import json
+          import os
+          import time
+          from datetime import datetime, timezone
+
+          region = os.environ["AWS_REGION"]
+          database = os.environ["ATHENA_DATABASE"]
+          output = os.environ["ATHENA_OUTPUT"]
+
+          sql = """
+          SELECT
+              bloco_indicador,
+              nome_indicador,
+              codigo_indicador,
+              nivel,
+              nome_nivel,
+              janeiro,
+              fevereiro,
+              marco,
+              abril,
+              maio,
+              junho,
+              julho,
+              agosto,
+              setembro,
+              outubro,
+              year_to_date,
+              semana_passada
+          FROM cockpit_lab.vw_divisao
+
+          UNION ALL
+
+          SELECT
+              bloco_indicador,
+              nome_indicador,
+              codigo_indicador,
+              nivel,
+              nome_nivel,
+              janeiro,
+              fevereiro,
+              marco,
+              abril,
+              maio,
+              junho,
+              julho,
+              agosto,
+              setembro,
+              outubro,
+              year_to_date,
+              semana_passada
+          FROM cockpit_lab.vw_soma
+
+          UNION ALL
+
+          SELECT
+              bloco_indicador,
+              nome_indicador,
+              codigo_indicador,
+              nivel,
+              nome_nivel,
+              janeiro,
+              fevereiro,
+              marco,
+              abril,
+              maio,
+              junho,
+              julho,
+              agosto,
+              setembro,
+              outubro,
+              year_to_date,
+              semana_passada
+          FROM cockpit_lab.vw_percentil
+          """
+
+          athena = boto3.client("athena", region_name=region)
+
+          response = athena.start_query_execution(
+              QueryString=sql,
+              QueryExecutionContext={"Database": database},
+              ResultConfiguration={"OutputLocation": output},
+          )
+
+          query_id = response["QueryExecutionId"]
+          print(f"Athena QueryExecutionId: {query_id}")
+
+          while True:
+              status = athena.get_query_execution(
+                  QueryExecutionId=query_id
+              )["QueryExecution"]["Status"]
+
+              state = status["State"]
+              print(f"Estado Athena: {state}")
+
+              if state == "SUCCEEDED":
+                  break
+
+              if state in ("FAILED", "CANCELLED"):
+                  reason = status.get("StateChangeReason", "sem detalhe")
+                  raise RuntimeError(f"Consulta Athena {state}: {reason}")
+
+              time.sleep(2)
+
+          paginator = athena.get_paginator("get_query_results")
+          rows = paginator.paginate(QueryExecutionId=query_id)
+
+          result_rows = []
+          headers = None
+
+          for page in rows:
+              page_rows = page["ResultSet"]["Rows"]
+
+              if headers is None:
+                  headers = [
+                      cell.get("VarCharValue")
+                      for cell in page_rows[0]["Data"]
+                  ]
+                  page_rows = page_rows[1:]
+
+              for row in page_rows:
+                  values = [
+                      cell.get("VarCharValue")
+                      for cell in row["Data"]
+                  ]
+
+                  while len(values) < len(headers):
+                      values.append(None)
+
+                  result_rows.append(dict(zip(headers, values)))
+
+          numeric_fields = {
+              "janeiro", "fevereiro", "marco", "abril", "maio",
+              "junho", "julho", "agosto", "setembro", "outubro",
+              "year_to_date", "semana_passada"
+          }
+
+          for row in result_rows:
+              for field in numeric_fields:
+                  value = row.get(field)
+
+                  if value in (None, ""):
+                      row[field] = None
+                  else:
+                      row[field] = float(value)
+
+          payload = {
+              "atualizado_em": datetime.now(timezone.utc).isoformat(),
+              "origem": {
+                  "database": database,
+                  "views": [
+                      "vw_divisao",
+                      "vw_soma",
+                      "vw_percentil"
+                  ]
+              },
+              "quantidade_registros": len(result_rows),
+              "dados": result_rows
+          }
+
+          with open("data.json", "w", encoding="utf-8") as file:
+              json.dump(payload, file, ensure_ascii=False, indent=2)
+
+          print(f"data.json gerado com {len(result_rows)} registros")
+          PY
+
+      - name: Validar data.json
+        run: |
+          python - <<'PY'
+          import json
+
+          with open("data.json", encoding="utf-8") as f:
+              payload = json.load(f)
+
+          required = [
+              "bloco_indicador",
+              "nome_indicador",
+              "codigo_indicador",
+              "nivel",
+              "nome_nivel",
+              "janeiro",
+              "fevereiro",
+              "marco",
+              "abril",
+              "maio",
+              "junho",
+              "julho",
+              "agosto",
+              "setembro",
+              "outubro",
+              "year_to_date",
+              "semana_passada"
+          ]
+
+          assert isinstance(payload["dados"], list)
+          assert payload["dados"], "data.json veio vazio"
+
+          for row in payload["dados"]:
+              missing = [field for field in required if field not in row]
+              assert not missing, f"Campos ausentes: {missing}"
+
+          print(f"JSON validado: {len(payload['dados'])} registros")
+          PY
+
+      - name: Publicar data.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data.json
+
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração nos dados."
+          else
+            git commit -m "Atualiza dados do cockpit"
+            git push
+          fi
