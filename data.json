@@ -1,0 +1,13 @@
+{
+  "atualizado_em": null,
+  "origem": {
+    "database": "cockpit_lab",
+    "views": [
+      "vw_divisao",
+      "vw_soma",
+      "vw_percentil"
+    ]
+  },
+  "quantidade_registros": 0,
+  "dados": []
+}
